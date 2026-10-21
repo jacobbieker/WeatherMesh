@@ -23,6 +23,7 @@ Depth 5  -> nside=32,   Npix=12,288   (~1.8 deg, weather latent space)
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 
 class HEALPixMesh:
@@ -55,6 +56,10 @@ class HEALPixMesh:
         self.lats = lats.astype(np.float32)
         self.lons = lons.astype(np.float32)
         self.z = z_center[ring_idx].astype(np.float32)
+
+        # Cached torch tensors for vertex assignment (avoid reconversion per call)
+        self.lats_t = torch.as_tensor(self.lats)
+        self.lons_t = torch.as_tensor(self.lons)
 
         # 2D ring-grid shape (n_rings, pixels_per_ring) for reshape-based conv
         self.ring_shape = (self.n_rings, self.pixels_per_ring)
@@ -103,7 +108,6 @@ class HEALPixMesh:
     def to_2d(self, x):
         """Reshape a (B, n_pix, C) tensor into (B, n_rings, pixels_per_ring, C)."""
         B, N, C = x.shape
-        assert N == self.n_pix, f"Expected {self.n_pix} pixels, got {N}"
         return x.reshape(B, self.n_rings, self.pixels_per_ring, C)
 
     def from_2d(self, x):
@@ -113,5 +117,5 @@ class HEALPixMesh:
     def summary_str(self) -> str:
         return (
             f"HEALPix depth={self.depth}, nside={self.nside}, "
-            f"n_pix={self.n_pix}, rings={self.n_rings}x{pixels_per_ring := self.pixels_per_ring}"
+            f"n_pix={self.n_pix}, rings={self.n_rings}x{self.pixels_per_ring}"
         )

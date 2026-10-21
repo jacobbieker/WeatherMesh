@@ -26,8 +26,8 @@ def assign_to_vertices(locations_latlon: torch.Tensor, mesh: HEALPixMesh) -> tor
     """
     lat = torch.deg2rad(locations_latlon[..., 0])  # (B, N)
     lon = torch.deg2rad(locations_latlon[..., 1])
-    mlat = torch.deg2rad(torch.as_tensor(mesh.lats, dtype=locations_latlon.dtype, device=locations_latlon.device)).unsqueeze(0).unsqueeze(0)  # (1, 1, Nvert)
-    mlon = torch.deg2rad(torch.as_tensor(mesh.lons, dtype=locations_latlon.dtype, device=locations_latlon.device)).unsqueeze(0).unsqueeze(0)
+    mlat = torch.deg2rad(mesh.lats_t.to(device=locations_latlon.device, dtype=locations_latlon.dtype)).unsqueeze(0).unsqueeze(0)  # (1, 1, Nvert)
+    mlon = torch.deg2rad(mesh.lons_t.to(device=locations_latlon.device, dtype=locations_latlon.dtype)).unsqueeze(0).unsqueeze(0)
     dlon = lon.unsqueeze(-1) - mlon  # (B, N, Nvert)
     dist = (
         torch.sin((lat.unsqueeze(-1) - mlat) / 2) ** 2

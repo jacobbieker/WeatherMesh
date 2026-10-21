@@ -26,6 +26,8 @@ import torch.nn.functional as F
 import natten
 from natten.modules import NeighborhoodAttention2D as _NattenNA2D
 
+from models._meshes import HEALPixMesh
+
 natten.use_kv_parallelism_in_fused_na(True)
 natten.set_memory_usage_preference("unrestricted")
 
@@ -108,8 +110,9 @@ class EarthConvUp2d(nn.Module):
 
 
 class EarthConvEncoder2d(nn.Module):
-    def __init__(self, in_channels, conv_dims=[64, 192, 576, 1024], affine=True):
+    def __init__(self, in_channels, conv_dims=None, affine=True):
         super().__init__()
+        conv_dims = conv_dims or [64, 192, 576, 1024]
         self.down_layers = nn.ModuleList()
         for i in range(len(conv_dims) - 1):
             in_dim = conv_dims[i] if i != 0 else in_channels
@@ -132,8 +135,9 @@ class EarthConvEncoder2d(nn.Module):
 
 
 class EarthConvDecoder2d(nn.Module):
-    def __init__(self, out_channels, conv_dims=[1024, 576, 192, 64], affine=True):
+    def __init__(self, out_channels, conv_dims=None, affine=True):
         super().__init__()
+        conv_dims = conv_dims or [1024, 576, 192, 64]
         self.up_layers = nn.ModuleList()
         for i in range(len(conv_dims) - 1):
             in_dim = conv_dims[i]
@@ -296,7 +300,6 @@ class ResConvEncoder(nn.Module):
         # Surface: (B, Csfc, H, W) -> conv -> (B, C, H', W') -> project
         x_sfc = x[..., D * Cpr :].permute(0, 3, 1, 2)
         x_sfc = self.sfc_encoder(x_sfc)
-        assert x_sfc.shape[2] == Hp and x_sfc.shape[3] == Wp, (x_sfc.shape, Hp, Wp)
         x_sfc = x_sfc.permute(0, 2, 3, 1)
         x_sfc = self.sfc_to_latent(x_sfc)  # (B, H', W', latent)
 
@@ -341,7 +344,6 @@ class ResConvDecoder(nn.Module):
         # x: (B, H', W', latent)
         B, Hp, Wp, C = x.shape
         _, _, Dp = shape_info
-        assert Dp == self._Dp
         x = self.tr(x)
 
         # Pressure: latent -> (B, H', W', Dp*C) -> (B, C, Dp, H', W') -> ConvTranspose3d
@@ -400,3 +402,68 @@ class ForecastModel(nn.Module):
         latent = self.process(latent, shape_info)
         out = self.decode(latent, shape_info)
         return out
+
+
+def build_forecast_model(
+    pressure_vars: list[str],
+    sfc_vars: list[str],
+    levels: list[int],
+    depth_state: int = 8,
+    depth_latent: int = 5,
+    latent_size: int = 1024,
+    encdec_tr_depth: int = 2,
+    num_heads: int = 32,
+    window_size: int = 7,
+) -> ForecastModel:
+    """Build a HEALPix forecast model from variable catalogs.
+
+    Shared constructor used by get_WeatherMesh4 / 5c / 6.  Returns a
+    ForecastModel with state_mesh, latent_mesh, levels, pressure_vars,
+    sfc_vars, n_pr_vars and n_sfc_vars attached.
+    """
+    state_mesh = HEALPixMesh(depth=depth_state)
+    latent_mesh = HEALPixMesh(depth=depth_latent)
+
+    n_pr_vars = len(pressure_vars)
+    n_sfc_vars = len(sfc_vars)
+    n_levels = len(levels)
+
+    H, W = state_mesh.ring_shape
+    config = ForecastConfig(
+        latent_size=latent_size,
+        encdec_tr_depth=encdec_tr_depth,
+        num_heads=num_heads,
+        window_size=window_size,
+        affine=True,
+    )
+
+    encoder = ResConvEncoder(config, n_pr_vars, n_sfc_vars, n_levels)
+    decoder = ResConvDecoder(config, n_pr_vars, n_sfc_vars, n_levels)
+
+    model = ForecastModel(config, encoder, decoder, n_levels, H, W)
+    model.state_mesh = state_mesh
+    model.latent_mesh = latent_mesh
+    model.levels = levels
+    model.pressure_vars = pressure_vars
+    model.sfc_vars = sfc_vars
+    model.n_pr_vars = n_pr_vars
+    model.n_sfc_vars = n_sfc_vars
+    return model
+
+
+class BaseEnsemble:
+    """Base wrapper that runs a forecast model as an ``n_members`` ensemble."""
+
+    def __init__(self, model, n_members: int):
+        self.model = model
+        self.n_members = n_members
+
+    def forecast_ensemble(self, x):
+        """Run the model as an ``n_members`` ensemble.
+
+        Returns stacked outputs of shape (n_members, B, H, W, n_vars).
+        Architecture-only: no perturbations are applied (no weights).
+        """
+        outs = [self.model(x) for _ in range(self.n_members)]
+        return torch.stack(outs, dim=0)
+

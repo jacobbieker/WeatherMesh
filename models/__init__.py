@@ -16,7 +16,7 @@ weights are not public).
 
 from models.weathermesh_4 import get_WeatherMesh4
 from models.weathermesh_5c import get_WeatherMesh5c, WM5cContinuousForecaster
-from models.weathermesh_6 import get_WeatherMesh6, get_WeatherMesh6_3km
+from models.weathermesh_6 import get_WeatherMesh6, get_WeatherMesh6_3km, WM6Ensemble
 
 __all__ = [
     "get_WeatherMesh4",
@@ -24,4 +24,5 @@ __all__ = [
     "WM5cContinuousForecaster",
     "get_WeatherMesh6",
     "get_WeatherMesh6_3km",
+    "WM6Ensemble",
 ]

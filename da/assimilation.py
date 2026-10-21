@@ -37,7 +37,8 @@ class AssimilationPhase(nn.Module):
         # Stage 1: inject each observation increment, let background self-organise
         for inc in increments:
             x = x + inc.reshape(B, Nvert * D, C)
-            x = self.stage1[0](x)
+        for layer in self.stage1:
+            x = layer(x)
 
         # Stage 2: the DA step -- background updated using all observations
         x = self.stage2(x)
