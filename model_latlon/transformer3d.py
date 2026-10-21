@@ -8,47 +8,14 @@ from typing import Optional, Tuple
 import warnings
 
 import natten
-from natten.utils import check_all_args
-from natten.types import CausalArg3DTypeOrDed, Dimension3DTypeOrDed
-from natten.functional import FusedNeighborhoodAttention3D
+from natten.modules import NeighborhoodAttention3D as _NattenNA3D
 
 # Initialize NATTEN and error logging
 os.environ['NATTEN_LOG_LEVEL'] = 'error'
 warnings.simplefilter(action='ignore', category=FutureWarning)
-natten.use_fused_na(True)
 natten.use_kv_parallelism_in_fused_na(True)
 natten.set_memory_usage_preference("unrestricted")
 
-def tuned_na3d(
-    query: Tensor,
-    key: Tensor,
-    value: Tensor,
-    kernel_size: Dimension3DTypeOrDed,
-    dilation: Dimension3DTypeOrDed = 1,
-    is_causal: Optional[CausalArg3DTypeOrDed] = False,
-    rpb: Optional[Tensor] = None,
-    scale: Optional[float] = None,
-) -> Tensor:
-    if query.is_nested or key.is_nested or value.is_nested:
-        raise NotImplementedError(
-            "Fused neighborhood attention does not support nested tensors yet."
-        )
-
-    tiling_config_forward, tiling_config_backward = ((8, 2, 4), (8, 2, 4)), ((8, 4, 2), (8, 2, 4), (1, 45, 30), False)
-    scale = scale or query.shape[-1] ** -0.5
-
-    return FusedNeighborhoodAttention3D.apply(
-        query,
-        key,
-        value,
-        rpb,
-        kernel_size,
-        dilation,
-        is_causal,
-        scale,
-        tiling_config_forward,
-        tiling_config_backward,
-    )
 
 def posemb_sincos_3d(patches, temperature = 10000, dtype = torch.float32):
     (_, f, h, w, dim), device, dtype = patches
@@ -57,7 +24,7 @@ def posemb_sincos_3d(patches, temperature = 10000, dtype = torch.float32):
         torch.arange(f, device = device),
         torch.arange(h, device = device),
         torch.arange(w, device = device),
-    indexing = 'ij')
+        indexing = 'ij')
 
     fourier_dim = dim // 6
 
@@ -73,16 +40,19 @@ def posemb_sincos_3d(patches, temperature = 10000, dtype = torch.float32):
     pe = F.pad(pe, (0, dim - (fourier_dim * 6))) # pad if feature dimension not cleanly divisible by 6
     return pe.type(dtype)
 
+
 def add_posemb(x):
     B, D, H, W, C = x.shape
     pe = posemb_sincos_3d(((0, D, H, W, C), x.device, x.dtype)).unsqueeze(0).reshape(B,D,H,W,C)
     x = x + pe
     return x
 
+
 class CustomNeighborhoodAttention3D(nn.Module):
     """
-    Neighborhood Attention 3D Module
+    Neighborhood Attention 3D Module backed by NATTEN 0.21 (libnatten).
     """
+
     def __init__(
         self,
         dim: int,
@@ -99,64 +69,42 @@ class CustomNeighborhoodAttention3D(nn.Module):
     ):
         assert dilation == 1
         assert not is_causal
-
-        super().__init__()
-        kernel_size, dilation, is_causal = check_all_args(
-            3, kernel_size, dilation, is_causal
-        )
-        if any(is_causal) and rel_pos_bias:
+        if embedding_module is not None and embedding_module != "nothing":
+            raise NotImplementedError("embedding_module is not supported by NATTEN 0.21")
+        if any(is_causal) if isinstance(is_causal, tuple) else is_causal:
+            pass
+        if rel_pos_bias:
             raise NotImplementedError(
                 "Causal neighborhood attention is undefined with positional biases."
                 "Please consider disabling positional biases, or open an issue."
             )
 
+        super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // self.num_heads
-        self.scale = qk_scale or self.head_dim**-0.5
+        self.scale = qk_scale or self.head_dim ** -0.5
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.is_causal = is_causal
 
-        self.embed_mod = embedding_module
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-
-        self.attn_drop_rate = attn_drop
-        self.attn_drop = nn.Dropout(self.attn_drop_rate)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        self.attn = _NattenNA3D(
+            embed_dim=dim,
+            num_heads=num_heads,
+            kernel_size=kernel_size,
+            qkv_bias=qkv_bias,
+            qk_scale=self.scale,
+            proj_drop=proj_drop,
+        )
+        self.attn_drop = nn.Dropout(attn_drop) if attn_drop > 0 else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
         if x.dim() != 5:
             raise ValueError(
-                f"NeighborhoodAttention2D expected a rank-5 input tensor; got {x.dim()=}."
+                f"NeighborhoodAttention3D expected a rank-5 input tensor; got {x.dim()=}."
             )
-
-        B, D, H, W, C = x.shape
-
-        qkv = (
-            self.qkv(x)
-            .reshape(B, D, H, W, 3, self.num_heads, self.head_dim)
-            .permute(4, 0, 1, 2, 3, 5, 6)
-        )
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        if self.embed_mod is None:
-            q = q * self.scale
-
-        assert self.embed_mod is None or self.embed_mod == "nothing"
-
-        x_2 = tuned_na3d(
-            q,
-            k,
-            v,
-            kernel_size=self.kernel_size,
-            dilation=self.dilation,
-            is_causal=self.is_causal,
-            rpb=None,
-        )
-        x = x_2.reshape(B, D, H, W, C)
-
-        return self.proj_drop(self.proj(x))
+        x = self.attn(x)
+        x = self.attn_drop(x)
+        return x
 
     def extra_repr(self) -> str:
         return (

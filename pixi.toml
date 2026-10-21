@@ -1,0 +1,18 @@
+[workspace]
+name = "weathermesh"
+channels = ["conda-forge", "pytorch"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+python = ">=3.10,<3.14"
+pytorch = ">=2.13.0,<2.14.0"
+numpy = ">=1.24,<3"
+
+[pypi-dependencies]
+natten = "==0.21.7"
+matepoint = { version = "*", index = "https://test.pypi.org/simple/" }
+
+[tasks]
+install = { description = "Install the repo in editable mode", cmd = "pip install -e ." }
+run-model = { description = "Run the WeatherMesh-3 architecture demo", cmd = "python model.py" }
+run-tests = { description = "Run the model smoke tests", cmd = "python -m pytest tests -q" }
